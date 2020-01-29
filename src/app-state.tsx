@@ -69,4 +69,4 @@ export const AppStateProvider: FC = ({ children }) => {
 }
 
 export const useDispatch = () => useContext(DispatchContext)
-export const useState = () => useContext(StateContext)
+export const useAppState = () => useContext(StateContext)
