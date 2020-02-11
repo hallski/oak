@@ -1,33 +1,11 @@
 import { useCallback, useEffect, useState } from "react"
-import { from, Observable, Subject } from "rxjs"
-import {
-  distinctUntilChanged,
-  filter,
-  map,
-  mergeMap,
-  share,
-  tap,
-  withLatestFrom
-} from "rxjs/operators"
+import { Observable, Subject } from "rxjs"
+import { distinctUntilChanged, map, tap, withLatestFrom } from "rxjs/operators"
 
-type EffectResult<Action> = Promise<Action> | Observable<Action>
-type EffectRun<Action> = () => EffectResult<Action>
-
-type Effect<Action, Data = any> = {
-  name: string
-  run: EffectRun<Action>
-  data?: Data
-}
-
-export const makeEffect = <Action, Data = any>(
-  name: string,
-  run: EffectRun<Action>,
-  data?: Data
-): Effect<Action, Data> => ({
-  name,
-  run,
-  data
-})
+export type Dispatch<Action> = (msg: Action) => void
+export type EffectHandler<Action, Effect> = (
+  dispatch: Dispatch<Action>
+) => (effect: Effect) => void
 
 type StrictPropertyCheck<T, TExpected, TError> = Exclude<
   keyof T,
@@ -36,48 +14,39 @@ type StrictPropertyCheck<T, TExpected, TError> = Exclude<
   ? {}
   : TError
 
-export type Next<State, Action> = { state: State; effect?: Effect<Action> }
-
-const observableFromEffectResult = <Action>(
-  result: EffectResult<Action>
-): Observable<Action> => (result instanceof Promise ? from(result) : result)
+export type Next<State, Effect> = { state: State; effect?: Effect }
 
 // The state is strictly property checked for excess properties to give better
 // feedback when using without having to manually define the types
-export const next = <State, Action, T extends State = State>(
+export const next = <State, Effect, T extends State = State>(
   state: T &
     StrictPropertyCheck<
       T,
       State,
       "Passed in invalid state properties, use next<State, Action>() for more descriptive error"
     >,
-  effect?: Effect<Action>
-): Next<State, Action> => ({
+  effect?: Effect
+): Next<State, Effect> => ({
   state,
   effect
 })
 export type Init<State, Action> =
   | Next<State, Action>
   | (() => Next<State, Action>)
-export type Update<State, Action> = (
+export type Update<State, Action, Effect> = (
   state: State,
   msg: Action
-) => Next<State, Action>
-
-export type Dispatch<Action> = (msg: Action) => void
-
-function isEffect<Action>(effect?: Effect<Action>): effect is Effect<Action> {
-  return !!effect
-}
+) => Next<State, Effect>
 
 export type OakOptions = {
   log?: boolean
 }
 
-export const setupOak = <State, Action>(
-  updateFunc: Update<State, Action>,
+export const setupOak = <State, Action, Effect>(
+  updateFunc: Update<State, Action, Effect>,
+  effectHandler: EffectHandler<Action, Effect>,
   initialState: State,
-  initialEffect?: Effect<Action>,
+  initialEffect?: Effect,
   opts?: OakOptions
 ): [Observable<State>, Dispatch<Action>] => {
   const log = (opts && opts.log) || false
@@ -85,43 +54,31 @@ export const setupOak = <State, Action>(
   const action$ = new Subject<Action>()
   const state$ = new Subject<State>()
 
-  const next$ = action$.pipe(
-    withLatestFrom(state$),
-    tap(([msg, state]) => console.log("calling update:", msg, state)),
-    map(([msg, state]) => updateFunc(state, msg)),
-    tap(next => log && console.log("Update returned:", next)),
-    share()
-  )
+  const dispatch: Dispatch<Action> = (action: Action) => action$.next(action)
 
-  next$
+  const handleEffect = effectHandler(dispatch)
+
+  action$
     .pipe(
-      map(({ effect }) => effect),
-      filter(isEffect),
-      mergeMap((effect: Effect<Action>) =>
-        observableFromEffectResult(effect.run())
-      )
+      withLatestFrom(state$),
+      tap(([msg, state]) => console.log("calling update:", msg, state)),
+      map(([msg, state]) => updateFunc(state, msg)),
+      tap(next => log && console.log("Update returned:", next)),
+      tap(next => next.effect !== undefined && handleEffect(next.effect)),
+      map(next => next.state)
     )
-    .subscribe(action$)
+    .subscribe(state => state$.next(state))
 
-  next$.pipe(map(next => next.state)).subscribe(state$)
-
-  // Prime the initials
-  initialEffect &&
-    observableFromEffectResult(initialEffect.run()).subscribe(m =>
-      action$.next(m)
-    )
   state$.next(initialState)
-
-  const dispatch: Dispatch<Action> = (msg: Action) => {
-    action$.next(msg)
-  }
+  initialEffect !== undefined && handleEffect(initialEffect)
 
   return [state$.pipe(distinctUntilChanged()), dispatch]
 }
 
-export const useOak = <State, Action>(
-  updateFunc: Update<State, Action>,
-  init: Init<State, Action>,
+export const useOak = <State, Action, Effect>(
+  updateFunc: Update<State, Action, Effect>,
+  init: Init<State, Effect>,
+  effectHandler: EffectHandler<Action, Effect>,
   opts?: OakOptions
 ): [State, Dispatch<Action>] => {
   const { state: initialValue, effect: initialEffect } =
@@ -133,13 +90,17 @@ export const useOak = <State, Action>(
   })
 
   useEffect(() => {
-    const [state$, d] = setupOak(updateFunc, initialValue, initialEffect, opts)
+    const [state$, d] = setupOak(
+      updateFunc,
+      effectHandler,
+      initialValue,
+      initialEffect,
+      opts
+    )
 
     setOakDispatch({ d })
 
-    const stateSubscription = state$.subscribe(newState => {
-      setState(newState)
-    })
+    const stateSubscription = state$.subscribe(newState => setState(newState))
 
     return () => {
       stateSubscription.unsubscribe()

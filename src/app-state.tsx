@@ -1,7 +1,5 @@
 import React, { FC, useContext } from "react"
-import { ajax } from "rxjs/ajax"
-import { delay, map } from "rxjs/operators"
-import { Init, makeEffect, next, Update, useOak } from "./oak"
+import { EffectHandler, Init, next, Update, useOak } from "./oak"
 
 export type RemoteData<T> = "initial" | "loading" | T
 
@@ -22,36 +20,42 @@ type AppAction =
   | { type: "GotResult"; data: string }
   | { type: "AfterTimeout" }
 
-const init: Init<State, AppAction> = next(initialState)
+type AppEffect = { type: "FetchTodos" } | { type: "Timeout"; duration: number }
 
-export const fetchTodos = makeEffect<AppAction>("fetchTodos", () =>
-  ajax("https://jsonplaceholder.typicode.com/todos/1").pipe(
-    delay(1000),
-    map(res => ({ type: "GotResult", data: res.response.title }))
-  )
-)
+const init: Init<State, AppEffect> = next(initialState)
 
-export const promiseTimeout = (duration: number) =>
-  makeEffect<AppAction, { duration: number }>(
-    "promiseTimeout",
-    () =>
-      new Promise(resolve =>
-        setTimeout(() => resolve({ type: "AfterTimeout" }), duration)
-      ),
-    {
-      duration
-    }
-  )
-
-export const update: Update<State, AppAction> = (state, msg) => {
+export const update: Update<State, AppAction, AppEffect> = (state, msg) => {
   switch (msg.type) {
     case "Add":
-      return next({ ...state, result: msg.x + msg.y }, promiseTimeout(2000))
+      return next(
+        { ...state, result: msg.x + msg.y },
+        { type: "Timeout", duration: 2000 }
+      )
     case "GotResult":
       return next({ ...state, httpResult: msg.data })
     case "AfterTimeout":
-      const cmd = state.httpResult === "initial" ? fetchTodos : undefined
+      const cmd =
+        state.httpResult === "initial"
+          ? ({ type: "FetchTodos" } as AppEffect)
+          : undefined
       return next({ ...state, timeoutDone: true, httpResult: "loading" }, cmd)
+  }
+}
+
+const effectHandler: EffectHandler<
+  AppAction,
+  AppEffect
+> = dispatch => effect => {
+  switch (effect.type) {
+    case "FetchTodos":
+      fetch("https://jsonplaceholder.typicode.com/todos/1")
+        .then(result => result.json())
+        .then(json => ({ type: "GotResult", data: json.title } as AppAction))
+        .then(dispatch)
+      break
+    case "Timeout":
+      setTimeout(() => dispatch({ type: "AfterTimeout" }), effect.duration)
+      break
   }
 }
 
@@ -59,7 +63,9 @@ const DispatchContext = React.createContext((_: AppAction) => {})
 const StateContext = React.createContext(initialState)
 
 export const AppStateProvider: FC = ({ children }) => {
-  const [state, dispatch] = useOak(update, init, { log: true })
+  const [state, dispatch] = useOak(update, init, effectHandler, {
+    log: true
+  })
 
   return (
     <DispatchContext.Provider value={dispatch}>
